@@ -293,7 +293,7 @@ impl Environment {
             .read(bundle.icon_path())
             .map_err(|_| "Could not read icon file".to_string())?;
         let icon = image::Image::from_bytes(&icon)
-            .map_err(|_| "Could not parse icon image".to_string())?;
+            .map_err(|e| format!("Could not parse icon image {:?}: {}", bundle.icon_path(), e).to_string())?;
 
         let launch_image = fs
             .read(bundle.launch_image_path())
