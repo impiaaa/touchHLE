@@ -32,12 +32,14 @@ use std::num::NonZeroU32;
 pub enum DeviceOrientation {
     Portrait,
     LandscapeLeft,
+    LandscapeRight,
 }
 fn size_for_orientation(orientation: DeviceOrientation, scale_hack: NonZeroU32) -> (u32, u32) {
     let scale_hack = scale_hack.get();
     match orientation {
         DeviceOrientation::Portrait => (320 * scale_hack, 480 * scale_hack),
         DeviceOrientation::LandscapeLeft => (480 * scale_hack, 320 * scale_hack),
+        DeviceOrientation::LandscapeRight => (480 * scale_hack, 320 * scale_hack),
     }
 }
 
@@ -89,7 +91,12 @@ pub struct Window {
     virtual_cursor_last: Option<(f32, f32, bool, bool)>,
 }
 impl Window {
-    pub fn new(title: &str, icon: Image, launch_image: Option<Image>, options: &Options) -> Window {
+    pub fn new(
+        title: &str,
+        icon: Option<Image>,
+        launch_image: Option<Image>,
+        options: &Options,
+    ) -> Window {
         let sdl_ctx = sdl2::init().unwrap();
         let video_ctx = sdl_ctx.video().unwrap();
 
@@ -102,7 +109,7 @@ impl Window {
 
         // TODO: some apps specify their orientation in Info.plist, we could use
         // that here.
-        let device_orientation = DeviceOrientation::Portrait;
+        let device_orientation = options.initial_orientation;
 
         let (width, height) = size_for_orientation(device_orientation, scale_hack);
         let mut window = video_ctx
@@ -112,7 +119,9 @@ impl Window {
             .build()
             .unwrap();
 
-        window.set_icon(surface_from_image(&icon));
+        if let Some(icon) = icon {
+            window.set_icon(surface_from_image(&icon));
+        }
 
         let event_pump = sdl_ctx.event_pump().unwrap();
 
@@ -143,7 +152,7 @@ impl Window {
             viewport_y_offset: 0,
             scale_hack,
             splash_image_and_gl_ctx,
-            device_orientation: DeviceOrientation::Portrait,
+            device_orientation,
             app_gl_ctx_no_longer_current: false,
             controller_ctx,
             controllers: Vec::new(),
@@ -506,6 +515,7 @@ impl Window {
         match self.device_orientation {
             DeviceOrientation::Portrait => Matrix::identity(),
             DeviceOrientation::LandscapeLeft => Matrix::z_rotation(-FRAC_PI_2),
+            DeviceOrientation::LandscapeRight => Matrix::z_rotation(FRAC_PI_2),
         }
     }
 
@@ -515,6 +525,7 @@ impl Window {
         match self.device_orientation {
             DeviceOrientation::Portrait => Matrix::identity(),
             DeviceOrientation::LandscapeLeft => Matrix::z_rotation(FRAC_PI_2),
+            DeviceOrientation::LandscapeRight => Matrix::z_rotation(-FRAC_PI_2),
         }
     }
 

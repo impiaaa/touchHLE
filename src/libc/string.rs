@@ -26,10 +26,7 @@ fn memcpy(
     src: ConstVoidPtr,
     size: GuestUSize,
 ) -> MutVoidPtr {
-    for i in 0..size {
-        env.mem
-            .write(dest.cast::<u8>() + i, env.mem.read(src.cast::<u8>() + i));
-    }
+    env.mem.memmove(dest, src, size);
     dest
 }
 
@@ -39,21 +36,7 @@ fn memmove(
     src: ConstVoidPtr,
     size: GuestUSize,
 ) -> MutVoidPtr {
-    match src.to_bits().cmp(&dest.to_bits()) {
-        Ordering::Equal => (),
-        Ordering::Less => {
-            for i in (0..size).rev() {
-                env.mem
-                    .write(dest.cast::<u8>() + i, env.mem.read(src.cast::<u8>() + i));
-            }
-        }
-        Ordering::Greater => {
-            for i in 0..size {
-                env.mem
-                    .write(dest.cast::<u8>() + i, env.mem.read(src.cast::<u8>() + i));
-            }
-        }
-    }
+    env.mem.memmove(dest, src, size);
     dest
 }
 
@@ -84,7 +67,7 @@ fn strcat(env: &mut Environment, dest: MutPtr<u8>, src: ConstPtr<u8>) -> MutPtr<
     dest
 }
 
-fn strdup(env: &mut Environment, src: ConstPtr<u8>) -> MutPtr<u8> {
+pub(super) fn strdup(env: &mut Environment, src: ConstPtr<u8>) -> MutPtr<u8> {
     let len = strlen(env, src);
     let new = env.mem.alloc(len + 1).cast();
     strcpy(env, new, src)
@@ -102,6 +85,31 @@ fn strcmp(env: &mut Environment, a: ConstPtr<u8>, b: ConstPtr<u8>) -> i32 {
             Ordering::Greater => return 1,
             Ordering::Equal => {
                 if char_a == b'\0' {
+                    return 0;
+                } else {
+                    continue;
+                }
+            }
+        }
+    }
+}
+
+fn strncmp(env: &mut Environment, a: ConstPtr<u8>, b: ConstPtr<u8>, n: GuestUSize) -> i32 {
+    if n == 0 {
+        return 0;
+    }
+
+    let mut offset = 0;
+    loop {
+        let char_a = env.mem.read(a + offset);
+        let char_b = env.mem.read(b + offset);
+        offset += 1;
+
+        match char_a.cmp(&char_b) {
+            Ordering::Less => return -1,
+            Ordering::Greater => return 1,
+            Ordering::Equal => {
+                if offset == n || char_a == b'\0' {
                     return 0;
                 } else {
                     continue;
@@ -156,6 +164,27 @@ fn strtok(env: &mut Environment, s: MutPtr<u8>, sep: ConstPtr<u8>) -> MutPtr<u8>
     token_start
 }
 
+fn strstr(env: &mut Environment, string: ConstPtr<u8>, substring: ConstPtr<u8>) -> ConstPtr<u8> {
+    let mut offset = 0;
+    loop {
+        let mut inner_offset = 0;
+        loop {
+            let char_string = env.mem.read(string + offset + inner_offset);
+            let char_substring = env.mem.read(substring + inner_offset);
+            if char_substring == b'\0' {
+                return string + offset;
+            } else if char_string == b'\0' {
+                return Ptr::null();
+            } else if char_string != char_substring {
+                break;
+            } else {
+                inner_offset += 1;
+            }
+        }
+        offset += 1;
+    }
+}
+
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(memset(_, _, _)),
     export_c_func!(memcpy(_, _, _)),
@@ -165,5 +194,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(strcat(_, _)),
     export_c_func!(strdup(_)),
     export_c_func!(strcmp(_, _)),
+    export_c_func!(strncmp(_, _, _)),
     export_c_func!(strtok(_, _)),
+    export_c_func!(strstr(_, _)),
 ];

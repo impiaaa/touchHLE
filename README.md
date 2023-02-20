@@ -4,13 +4,15 @@
 
 As an HLE, touchHLE is radically different from a low-level emulator (LLE) like QEMU. The only code the [emulated CPU](https://github.com/merryhime/dynarmic) executes is the app binary and [a handful of libraries](touchHLE_dylibs/); touchHLE takes the place of iPhone OS and provides its own implementations of the system frameworks (Foundation, UIKit, OpenGL ES, OpenAL, etc).
 
-The goal of this project is to run games from the early days of iOS. Only iPhone/iPod touch apps for iPhone OS 2.x have been tested so far. Modern/64-bit iOS app support is explicitly a non-goal, and support for apps that aren't games is unlikely to be prioritized due to the complexity. On the other hand, it's likely that we'll attempt to support apps for some newer 32-bit versions (especially 3.x and 4.x) and the iPad in future. iPhone OS 1.x support might be attempted also.
+The goal of this project is to run games from the early days of iOS. Only iPhone/iPod touch apps for iPhone OS 2.x have been tested so far. Modern/64-bit iOS app support is explicitly a non-goal, and support for apps that aren't games is unlikely to be prioritized due to the complexity. On the other hand, it's likely that we'll attempt to support apps for some newer 32-bit versions (especially 3.x and 4.x) and the iPad in future. iPhone OS 1.x support might be attempted also. Currently [only two apps are supported](APP_SUPPORT.md). The list will surely grow with time. :)
 
 Visit our homepage! <https://touchhle.org/>
 
+If you're curious about the history and motivation behind the project, you might want to read [the original announcement](https://hikari.noyu.me/blog/2023-02-06-touchhle-anouncement-thread-tech-games-me-and-passion-projects.html).
+
 ## Important disclaimer
 
-This project is not affiliated with or endorsed by Apple Inc in any way. iPhone, iPhone OS, iOS, iPod, iPod touch and iPad may be trademarks of Apple Inc in the United States or other countries.
+This project is not affiliated with or endorsed by Apple Inc in any way. iPhone, iOS, iPod, iPod touch and iPad are trademarks of Apple Inc in the United States and other countries.
 
 Only use touchHLE to emulate software you legally own.
 
@@ -18,71 +20,48 @@ Only use touchHLE to emulate software you legally own.
 
 touchHLE has been tested and is to be considered supported on x64 Windows and x64 macOS. It may be possible to build it on Linux and on some AArch64 systems (at least one person has succeeded), but we make no guarantees right now. If you're an Apple Silicon Mac user: don't worry, the x64 macOS build reportedly works under Rosetta.
 
+**Known issue on macOS: memory leak of approximately 0.2MB/second (30fps games) or 0.4MB/second (60fps games).** All obvious potential culprits in the emulator itself have been ruled out, so it might be a problem in macOS itself, SDL2, or some other dependency. Thankfully this is slow enough that it shouldn't be a problem for most play sessions, but you may want to keep an eye on it.
+
 Architectures other than x64 and AArch64 are completely unsupported, and this is unlikely to change.
 
 It would be desirable to eventually support Android. That is probably not too much work.
 
-Since the current targets are desktop operating systems, touch input is simulated via mouse input or the right analog stick on a game controller (tap/hold by pressing the stick or shoulder button), and accelerometer input (rotation only) is simulated via the left analog stick on a game controller. **Real accelerometer support coming soon, but not in the first release.**
+Input methods:
+
+- For simulated touch input, there are two options:
+  - Mouse/trackpad input (tap/hold/drag by pressing the left mouse button)
+  - Virtual cursor using the right analog stick on a game controller (tap/hold/drag by pressing the stick or the right shoulder button)
+- **For simulated accelerometer input (tilt controls), a game controller with a left analog stick is currently required.** Real accelerometer support will come soon, but it's not in the first releases.
 
 ## Development status
 
-Real development started in December 2022, and this is so far [a single person](https://hikari.noyu.me/)'s full-time passion project. There's only a single release so far and no promises can be made about the future. Please be patient.
+Real development started in December 2022, and this is so far [a single person](https://hikari.noyu.me/)'s full-time passion project. There's only been a handful of releases so far and no promises can be made about the future. Please be patient.
 
 Currently, the supported functionality is not much more than what the single supported app uses. The code tries to be reasonably complete where it can, though.
 
-## App support
-
-For pretty screenshots and video, [check out the home page!](https://touchhle.org/)
-
-- Super Monkey Ball (2008, App Store launch title), tested versions 1.0, 1.02, 1.3 (1.3 is the most heavily tested)
-  - Fully playable, everything works. Among other things:
-    - Sound effects and music
-    - Logo, title, menu, ranking, settings and credits screens
-    - Main Game, Instant Game (Shuffle Play) and Practice game modes
-    - Save game persistence (settings, unlocks, records)
-    - Continuing a previous game after closing and reopening the app
-    - The tutorial (in the versions that have it)
-  - Consistent full fps (30fps) in release builds even on a fairly underpowered laptop (2017 Retina MacBook, passively cooled!)
-  - Special enhancement: can be run with increased internal resolution via the `--scale-hack=` option. Resolutions up to circa 4K have been tested. No noticeable performance impact at small scales (2×, 3×).
-  - Recommended game controller settings: `--y-tilt-offset=24`
-  - Known issue: memory leak of approximately 0.2MB/second on macOS. All obvious issues in the emulator itself have been ruled out, so it might be a problem in macOS itself, SDL2, or some other dependency. Thankfully this is slow enough that it shouldn't be a problem for most play sessions.
-
-No other apps are known to work right now. This will surely improve in future. :)
-
 # Usage
 
-First obtain touchHLE, either a [binary release](https://github.com/hikari-no-yume/touchHLE/release) or by building it yourself (see the next section).
+First obtain touchHLE, either a [binary release](https://github.com/hikari-no-yume/touchHLE/releases) or by building it yourself (see the next section).
 
-You'll then need an app that you can run. See the “App support” section above. Note that the app binary must be decrypted to be usable. Also note that you can't directly use `.ipa` files right now, you'll need to unzip it (this may be easier if you rename it to end in `.zip` first) and get the `.app` bundle out of it.
+You'll then need an app that you can run. See the “App support” section above. Note that the app binary must be decrypted to be usable.
 
 There's no graphical user interface right now, so you'll usually need to use the command line to run touchHLE. For first-time users on Windows:
 
-1. Move the `.app` bundle to the same folder as `touchHLE.exe`.
+1. Move the `.ipa` file or `.app` bundle to the same folder as `touchHLE.exe`.
 2. Hold the Shift key and Right-click on the empty space in the folder window.
 3. Click “Open with PowerShell”.
-4. You can then type `.\touchHLE.exe "YourAppNameHere.app"` and press enter.
-5. You may want to type `.\touchHLE.exe` to see the available options for things like game controllers.
+4. You can then type `.\touchHLE.exe "YourAppNameHere.ipa"` (or `.app` as appropriate) and press enter.
+5. You may want to type `.\touchHLE.exe --help` to see the available options for things like game controllers. You can use options by adding a space after the app name (outside the quotes) and then writing the option's name. Options must be separated by spaces.
 
-# Building
+Currently language detection doesn't work on Windows. To change the language preference reported to the app, you can type `SET LANG=` followed by an ISO 639-1 language code, then press Enter, before running the app. Some common language codes are: `en` (English), `de` (Deutsch), `es` (español), `fr` (français), `it` (italiano) and `ja` (日本語). Bear in mind that it's the app itself that determines which languages are supported, not the emulator.
 
-You need [git](https://git-scm.com/), [the Rust toolchain](https://www.rust-lang.org/tools/install), and your platform's standard C and C++ compilers.
+Any data saved by the app (e.g. **saved games**) are stored in the `touchHLE_sandbox` folder.
 
-First check out the git repo with `git clone`. Also make sure you get the submodules (`git submodule update --init` should be enough).
+If the emulator crashes almost immediately while running a game **listed as supported**, please check whether you have any overlays turned on like the Steam overlay, Discord overlay, RivaTuner Statistics Server, etc. Sadly, as useful as these tools are, they work by injecting themselves into other apps or games and don't always clean up after themselves, so they can break touchHLE… it's not our fault. 😢 Currently only RivaTuner Statistics Server is known to be a problem. If you find another overlay that doesn't work, please tell us about it.
 
-There is one special external dependency, Boost:
+# Building and contributing
 
-* On Windows, download it from <https://www.boost.org/users/download/> and extract it to `vendor/boost`.
-* On other OSes, install Boost from your package manager. If you are on macOS and using [Homebrew](https://brew.sh/): `brew install boost`.
-
-Then you just need to run `cargo run --release` (for a release build) or `cargo run` (for a debug build) to build and run touchHLE. On an underpowered, passively-cooled, 2-core laptop (2017 Retina MacBook), a clean release build takes a bit less than 9 minutes.
-
-The `touchHLE_dylibs` and `touchHLE_fonts` directories contain files that the resulting binary will need at runtime, so you'll need to copy them if you want to distribute the result. You also should include the license files.
-
-# Contributing
-
-Please run `cargo fmt` and `cargo clippy` on your changes before committing. For the handful of C and C++ files, please use `clang-format -i` to format them.
-
-If you're going to open a pull request with non-trivial changes, please talk to us first so we can figure out if we're likely to accept them. It would be a shame if your effort had to be wasted.
+Please see the BUILDING.md and CONTRIBUTING.md files in the git repo.
 
 # License
 
@@ -100,9 +79,11 @@ Please note that different licensing terms apply to the bundled dynamic librarie
 
 We stand on the shoulders of giants. Thank you to:
 
+* Everyone who has contributed to the project or supported it financially.
 * The authors of and contributors to the many libraries used by this project: [dynarmic](https://github.com/merryhime/dynarmic), [rust-macho](https://github.com/flier/rust-macho), [SDL](https://libsdl.org/), [rust-sdl2](https://github.com/Rust-SDL2/rust-sdl2), [stb\_image](https://github.com/nothings/stb), [openal-soft](https://github.com/kcat/openal-soft), [hound](https://github.com/ruuda/hound), [caf](https://github.com/rustaudio/caf), [RustType](https://gitlab.redox-os.org/redox-os/rusttype), [the Liberation fonts](https://github.com/liberationfonts/liberation-fonts), [the Noto CJK fonts](https://github.com/googlefonts/noto-cjk), [rust-plist](https://github.com/ebarnard/rust-plist), [gl-rs](https://github.com/brendanzab/gl-rs), [cargo-license](https://github.com/onur/cargo-license), [cc-rs](https://github.com/rust-lang/cc-rs), [cmake-rs](https://github.com/rust-lang/cmake-rs), and the Rust standard library.
 * The [Rust project](https://www.rust-lang.org/) generally.
 * The various people out there who've documented the iPhone OS platform, officially or otherwise. Much of this documentation is linked to within this codebase!
+* The iOS hacking/jailbreaking community.
 * The Free Software Foundation, for making libgcc and libstdc++ copyleft and therefore saving this project from ABI hell.
 * The National Security Agency of the United States of America, for [Ghidra](https://ghidra-sre.org/).
 * Many friends who took an interest in the project and gave suggestions and encouragement.

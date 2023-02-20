@@ -118,6 +118,13 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.borrow::<NSTimerHostObject>(this).due_by.is_some()
 }
 
+-(())invalidate {
+    // Remove the timer from the run loop.
+    env.objc.borrow_mut::<NSTimerHostObject>(this).due_by = None;
+    let run_loop: id = msg_class![env; NSRunLoop currentRunLoop];
+    ns_run_loop::remove_timer(env, run_loop, this);
+}
+
 // TODO: more constructors
 // TODO: more accessors
 
@@ -134,7 +141,9 @@ pub(super) fn set_run_loop(env: &mut Environment, timer: id, run_loop: id) {
 
 /// For use by `NSRunLoop`: check if a timer is due to fire and fire it if
 /// necessary.
-pub(super) fn handle_timer(env: &mut Environment, timer: id) {
+///
+/// Returns the next firing time, if any.
+pub(super) fn handle_timer(env: &mut Environment, timer: id) -> Option<Instant> {
     let &NSTimerHostObject {
         ns_interval,
         rust_interval,
@@ -152,7 +161,7 @@ pub(super) fn handle_timer(env: &mut Environment, timer: id) {
     let now = Instant::now();
 
     if due_by > now {
-        return;
+        return Some(due_by);
     }
 
     let overdue_by = now.duration_since(due_by);
@@ -163,7 +172,7 @@ pub(super) fn handle_timer(env: &mut Environment, timer: id) {
 
     // Advancing the timer before sending its message seems like a good idea
     // considering this function is potentially re-entrant.
-    if repeats {
+    let new_due_by = if repeats {
         // When rescheduling a repeating timer, the next firing should be based
         // on when the timer should have fired, not when it actually fired, so
         // that there is no drift over time.
@@ -181,15 +190,15 @@ pub(super) fn handle_timer(env: &mut Environment, timer: id) {
         assert!(advance_by == (advance_by as u32) as f64);
         let advance_by = advance_by as u32;
         if advance_by > 1 {
-            log!("Warning: Timer {:?} is lagging. It is overdue by {}s and has missed {} interval(s)!", timer, overdue_by.as_secs_f64(), advance_by - 1);
+            log_dbg!("Warning: Timer {:?} is lagging. It is overdue by {}s and has missed {} interval(s)!", timer, overdue_by.as_secs_f64(), advance_by - 1);
         }
         let advance_by = rust_interval.checked_mul(advance_by).unwrap();
-        env.objc.borrow_mut::<NSTimerHostObject>(timer).due_by =
-            Some(due_by.checked_add(advance_by).unwrap());
+        Some(due_by.checked_add(advance_by).unwrap())
     } else {
-        env.objc.borrow_mut::<NSTimerHostObject>(timer).due_by = None;
         ns_run_loop::remove_timer(env, run_loop, timer);
-    }
+        None
+    };
+    env.objc.borrow_mut::<NSTimerHostObject>(timer).due_by = new_due_by;
 
     log_dbg!(
         "Timer {:?} fired, sending {:?} message to {:?}",
@@ -205,4 +214,6 @@ pub(super) fn handle_timer(env: &mut Environment, timer: id) {
 
     release(env, timer);
     release(env, pool);
+
+    new_due_by
 }

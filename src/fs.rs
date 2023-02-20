@@ -8,26 +8,38 @@
 //! This lets us put files and directories where the guest app expects them to
 //! be, without constraining the layout of the host filesystem.
 //!
-//! Currently the filesystem layout is frozen at the point of creation. Except
-//! for creating new files in existing directories, no nodes can be created,
-//! deleted, renamed or moved.
+//! Most of the filesystem is frozen at the point of creation and can't be
+//! modified. The exception is the writeable parts of the app's sandboxed home
+//! directory (`Documents` etc).
 //!
-//! All files in the guest filesystem have a corresponding file in the host
-//! filesystem. Accessing a file requires traversing the guest filesystem's
-//! directory structure to find out the host path, but after that is done, the
-//! host file is accessed directly; there is no virtualization of file I/O.
+//! All files in the guest filesystem must have a corresponding file in the host
+//! filesystem, or a corresponding file inside a `.ipa` file (ZIP archive) in
+//! the host filesystem. Accessing a file requires traversing the guest
+//! filesystem's directory structure to find out the host path, or ZIP file
+//! member. After that point, the underlying file is accessed directly; there is
+//! no virtualization of file I/O.
 //!
 //! Directories only need a corresponding directory in the host filesystem if
 //! they are writeable (i.e. if new files can be created in them).
 
+mod bundle;
+
+pub use bundle::BundleData;
+
+use crate::fs::bundle::{IpaFile, IpaFileRef};
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 enum FsNode {
-    File {
+    HostFile {
         host_path: PathBuf,
         writeable: bool,
+    },
+    IpaBundleFile {
+        file: IpaFileRef,
     },
     Directory {
         children: HashMap<String, FsNode>,
@@ -55,7 +67,7 @@ impl FsNode {
             if kind.is_file() {
                 children.insert(
                     name,
-                    FsNode::File {
+                    FsNode::HostFile {
                         host_path,
                         writeable,
                     },
@@ -91,11 +103,14 @@ impl FsNode {
         assert!(children.insert(String::from(name), child).is_none());
         self
     }
-    fn file(host_path: PathBuf) -> Self {
-        FsNode::File {
+    fn host_file(host_path: PathBuf) -> Self {
+        FsNode::HostFile {
             host_path,
             writeable: false,
         }
+    }
+    fn bundle_zip_file(file: IpaFileRef) -> Self {
+        FsNode::IpaBundleFile { file }
     }
 }
 
@@ -104,7 +119,7 @@ impl FsNode {
 #[derive(Debug)]
 pub struct GuestPath(str);
 impl GuestPath {
-    pub fn new<S: AsRef<str>>(s: &S) -> &GuestPath {
+    pub fn new<S: AsRef<str> + ?Sized>(s: &S) -> &GuestPath {
         unsafe { &*(s.as_ref() as *const str as *const GuestPath) }
     }
     pub fn as_str(&self) -> &str {
@@ -120,11 +135,25 @@ impl GuestPath {
         GuestPathBuf::from(format!("{}/{}", self.as_str(), path.as_ref()))
     }
 
+    /// Splits the path into a parent path and a file name.
+    pub fn parent_and_file_name(&self) -> Option<(&GuestPath, &str)> {
+        // TODO
+        assert!(!self.as_str().ends_with('/'));
+        // FIXME: this should do the same resolution as `std::path::file_name()`
+        let (parent_name, file_name) = self.as_str().rsplit_once('/')?;
+        Some((GuestPath::new(parent_name), file_name))
+    }
+
     /// Get the final component of the path.
     pub fn file_name(&self) -> Option<&str> {
-        // FIXME: this should do the same resolution as `std::path::file_name()`
-        let (_, file_name) = self.as_str().rsplit_once('/')?;
+        let (_, file_name) = self.parent_and_file_name()?;
         Some(file_name)
+    }
+
+    /// Get the parent directory of the path.
+    pub fn parent(&self) -> Option<&GuestPath> {
+        let (parent_name, _) = self.parent_and_file_name()?;
+        Some(parent_name)
     }
 }
 impl AsRef<GuestPath> for GuestPath {
@@ -142,7 +171,7 @@ impl AsRef<GuestPath> for str {
         unsafe { &*(self as *const str as *const GuestPath) }
     }
 }
-impl std::borrow::ToOwned for GuestPath {
+impl ToOwned for GuestPath {
     type Owned = GuestPathBuf;
 
     fn to_owned(&self) -> GuestPathBuf {
@@ -225,6 +254,7 @@ fn resolve_path<'a>(path: &'a GuestPath, relative_to: Option<&'a GuestPath>) -> 
 
 /// Like [std::fs::OpenOptions] but for the guest filesystem.
 /// TODO: `create_new`.
+#[derive(Debug)]
 pub struct GuestOpenOptions {
     read: bool,
     write: bool,
@@ -276,6 +306,68 @@ fn handle_open_err<T>(open_result: std::io::Result<T>, host_path: &Path) -> T {
     }
 }
 
+/// Like [File] but for the guest filesystem.
+#[derive(Debug)]
+pub enum GuestFile {
+    HostFile(File),
+    IpaBundleFile(IpaFile),
+}
+
+impl GuestFile {
+    fn from_host_file(file: File) -> GuestFile {
+        GuestFile::HostFile(file)
+    }
+
+    fn from_ipa_file(file: &IpaFileRef) -> GuestFile {
+        GuestFile::IpaBundleFile(file.open())
+    }
+
+    pub fn sync_all(&self) -> std::io::Result<()> {
+        match self {
+            GuestFile::HostFile(file) => file.sync_all(),
+            GuestFile::IpaBundleFile(_) => Ok(()),
+        }
+    }
+}
+
+impl Read for GuestFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            GuestFile::HostFile(file) => file.read(buf),
+            GuestFile::IpaBundleFile(file) => file.read(buf),
+        }
+    }
+}
+
+impl Write for GuestFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            GuestFile::HostFile(file) => file.write(buf),
+            GuestFile::IpaBundleFile(file) => {
+                panic!("Attempt to write to a read-only file: {:?}", file)
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            GuestFile::HostFile(file) => file.flush(),
+            GuestFile::IpaBundleFile(file) => {
+                panic!("Attempt to flush a read-only file: {:?}", file)
+            }
+        }
+    }
+}
+
+impl Seek for GuestFile {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        match self {
+            GuestFile::HostFile(file) => file.seek(pos),
+            GuestFile::IpaBundleFile(file) => file.seek(pos),
+        }
+    }
+}
+
 /// The type that owns the guest filesystem and provides accessors for it.
 #[derive(Debug)]
 pub struct Fs {
@@ -299,7 +391,7 @@ impl Fs {
     /// sandbox directory, where documents can be stored. A directory will be
     /// created at that path if it does not already exist.
     pub fn new(
-        bundle_host_path: &Path,
+        app_bundle: BundleData,
         bundle_dir_name: String,
         bundle_id: &str,
     ) -> (Fs, GuestPathBuf) {
@@ -325,16 +417,16 @@ impl Fs {
         let usr_lib = FsNode::dir()
             .with_child(
                 "libgcc_s.1.dylib",
-                FsNode::file(dylibs_host_path.join("libgcc_s.1.dylib")),
+                FsNode::host_file(dylibs_host_path.join("libgcc_s.1.dylib")),
             )
             .with_child(
                 // symlink
                 "libstdc++.6.dylib",
-                FsNode::file(dylibs_host_path.join("libstdc++.6.0.4.dylib")),
+                FsNode::host_file(dylibs_host_path.join("libstdc++.6.0.4.dylib")),
             )
             .with_child(
                 "libstdc++.6.0.4.dylib",
-                FsNode::file(dylibs_host_path.join("libstdc++.6.0.4.dylib")),
+                FsNode::host_file(dylibs_host_path.join("libstdc++.6.0.4.dylib")),
             );
 
         let root = FsNode::dir()
@@ -346,13 +438,7 @@ impl Fs {
                         FAKE_UUID,
                         FsNode::Directory {
                             children: HashMap::from([
-                                (
-                                    bundle_dir_name,
-                                    FsNode::from_host_dir(
-                                        bundle_host_path,
-                                        /* writeable: */ false,
-                                    ),
-                                ),
+                                (bundle_dir_name, app_bundle.into_fs_node()),
                                 (
                                     "Documents".to_string(),
                                     FsNode::from_host_dir(
@@ -416,42 +502,43 @@ impl Fs {
         Some((parent, final_component.to_string()))
     }
 
-    /// Like [std::path::Path::is_file] but for the guest filesystem.
+    /// Like [Path::is_file] but for the guest filesystem.
     pub fn is_file(&self, path: &GuestPath) -> bool {
-        matches!(self.lookup_node(path), Some(FsNode::File { .. }))
+        matches!(
+            self.lookup_node(path),
+            Some(FsNode::HostFile { .. } | FsNode::IpaBundleFile { .. })
+        )
     }
 
     /// Like [std::fs::read] but for the guest filesystem.
     pub fn read<P: AsRef<GuestPath>>(&self, path: P) -> Result<Vec<u8>, ()> {
-        let node = self.lookup_node(path.as_ref()).ok_or(())?;
-        let FsNode::File {
-            host_path,
-            writeable: _,
-        } = node else {
-            return Err(())
-        };
-        Ok(handle_open_err(std::fs::read(host_path), host_path))
+        let mut file = self.open(path.as_ref())?;
+        let mut result = Vec::new();
+        file.read_to_end(&mut result).map_err(|_| ())?;
+        Ok(result)
     }
 
-    /// Like [std::fs::File::open] but for the guest filesystem.
+    /// Like [File::open] but for the guest filesystem.
     #[allow(dead_code)]
-    pub fn open<P: AsRef<GuestPath>>(&self, path: P) -> Result<std::fs::File, ()> {
+    pub fn open<P: AsRef<GuestPath>>(&self, path: P) -> Result<GuestFile, ()> {
+        // it would be nice to delegate to self.open_with_options, but currently it wants a mutable reference to self
         let node = self.lookup_node(path.as_ref()).ok_or(())?;
-        let FsNode::File {
-            host_path,
-            writeable: _,
-        } = node else {
-            return Err(())
-        };
-        Ok(handle_open_err(std::fs::File::open(host_path), host_path))
+        match node {
+            FsNode::HostFile { host_path, .. } => {
+                let host_file = handle_open_err(File::open(host_path), host_path);
+                Ok(GuestFile::from_host_file(host_file))
+            }
+            FsNode::IpaBundleFile { file } => Ok(GuestFile::from_ipa_file(file)),
+            FsNode::Directory { .. } => Err(()),
+        }
     }
 
-    /// Like [std::fs::File::options] but for the guest filesystem.
+    /// Like [File::options] but for the guest filesystem.
     pub fn open_with_options<P: AsRef<GuestPath>>(
         &mut self,
         path: P,
         options: GuestOpenOptions,
-    ) -> Result<std::fs::File, ()> {
+    ) -> Result<GuestFile, ()> {
         let GuestOpenOptions {
             read,
             write,
@@ -474,26 +561,38 @@ impl Fs {
         // Open an existing file if possible
 
         if let Some(existing_file) = children.get(&new_filename) {
-            let FsNode::File {
-                host_path,
-                writeable,
-            } = existing_file else {
-                return Err(());
-            };
-            if !writeable && (append || write) {
-                log!("Warning: attempt to write to read-only file {:?}", path);
-                return Err(());
+            match existing_file {
+                FsNode::HostFile {
+                    host_path,
+                    writeable,
+                } => {
+                    if !writeable && (append || write) {
+                        log!("Warning: attempt to write to read-only file {:?}", path);
+                        return Err(());
+                    }
+                    let file = handle_open_err(
+                        File::options()
+                            .read(read)
+                            .write(write)
+                            .append(append)
+                            .create(false)
+                            .truncate(truncate)
+                            .open(host_path),
+                        host_path,
+                    );
+                    return Ok(GuestFile::from_host_file(file));
+                }
+                FsNode::IpaBundleFile { file } => {
+                    if write || append || truncate {
+                        log!("Warning: attempt to write to read-only file {:?}", path);
+                        return Err(());
+                    }
+                    return Ok(GuestFile::from_ipa_file(file));
+                }
+                FsNode::Directory { .. } => {
+                    return Err(());
+                }
             }
-            return Ok(handle_open_err(
-                std::fs::File::options()
-                    .read(read)
-                    .write(write)
-                    .append(append)
-                    .create(false)
-                    .truncate(truncate)
-                    .open(host_path),
-                host_path,
-            ));
         };
 
         // Create a new file otherwise
@@ -516,7 +615,7 @@ impl Fs {
         let host_path = dir_host_path.join(&new_filename);
 
         let file = handle_open_err(
-            std::fs::File::options()
+            File::options()
                 .read(read)
                 .write(write)
                 .append(append)
@@ -532,11 +631,134 @@ impl Fs {
         );
         children.insert(
             new_filename,
-            FsNode::File {
+            FsNode::HostFile {
                 host_path,
                 writeable: true,
             },
         );
-        Ok(file)
+        Ok(GuestFile::from_host_file(file))
+    }
+
+    /// Removes a file or a directory. If the node is a directory, it must be
+    /// empty.
+    pub fn remove<P: AsRef<GuestPath>>(&mut self, path: P) -> Result<(), ()> {
+        let path = path.as_ref();
+
+        let (parent_node, node_name) = self.lookup_parent_node(path).ok_or(())?;
+
+        // Parent directory is not a directory
+        let FsNode::Directory {
+            children,
+            writeable: dir_writeable,
+        } = parent_node else {
+            return Err(());
+        };
+
+        if !dir_writeable.is_some() {
+            log!("Warning: attempt to delete file or directroy at path {:?}, but parent directory is read-only", path);
+            return Err(());
+        };
+
+        let Some(node) = children.get(&node_name) else {
+            // There is no file/directory with this name
+            return Err(());
+        };
+
+        match node {
+            FsNode::HostFile {
+                host_path,
+                writeable,
+            } => {
+                // Read-only files can't be removed. (This is probably not
+                // correct, but it is safer for now.)
+                if !writeable {
+                    return Err(());
+                }
+
+                handle_open_err(std::fs::remove_file(host_path), host_path);
+                log_dbg!(
+                    "Deleted file at path {:?} (host path: {:?})",
+                    path,
+                    host_path
+                );
+            }
+            FsNode::Directory {
+                children,
+                writeable,
+            } => {
+                // Directory is not empty
+                if !children.is_empty() {
+                    return Err(());
+                }
+                // Read-only directories can't be removed. (This is probably not
+                // correct, but it is safer for now.)
+                let Some(host_path) = writeable else {
+                    return Err(());
+                };
+
+                handle_open_err(std::fs::remove_dir(host_path), host_path);
+                log_dbg!(
+                    "Deleted directory at path {:?} (host path: {:?})",
+                    path,
+                    host_path
+                );
+            }
+            FsNode::IpaBundleFile { .. } => {
+                // Read-only
+                return Err(());
+            }
+        }
+
+        children.remove(&node_name).unwrap();
+
+        Ok(())
+    }
+
+    /// Like [std::fs::create_dir] but for the guest filesystem.
+    pub fn create_dir<P: AsRef<GuestPath>>(&mut self, path: P) -> Result<(), ()> {
+        let path = path.as_ref();
+
+        let (parent_node, new_dir_name) = self.lookup_parent_node(path).ok_or(())?;
+
+        // Parent directory is not a directory
+        let FsNode::Directory {
+            children,
+            writeable: dir_host_path,
+        } = parent_node else {
+            return Err(());
+        };
+
+        // There's already a file/directory with this name
+        if children.contains_key(&new_dir_name) {
+            return Err(());
+        }
+
+        let Some(dir_host_path) = dir_host_path else {
+            log!("Warning: attempt to create directory at path {:?}, but parent directory is read-only", path);
+            return Err(());
+        };
+
+        for c in new_dir_name.chars() {
+            if std::path::is_separator(c) {
+                panic!("Attempt to create directory at path {:?}, but directory name contains path separator character {:?}!", path, c);
+            }
+        }
+
+        let host_path = dir_host_path.join(&new_dir_name);
+
+        handle_open_err(std::fs::create_dir(&host_path), &host_path);
+        log_dbg!(
+            "Created directory at path {:?} (host path: {:?})",
+            path,
+            host_path
+        );
+        children.insert(
+            new_dir_name,
+            FsNode::Directory {
+                children: HashMap::new(),
+                writeable: Some(host_path),
+            },
+        );
+        Ok(())
     }
 }

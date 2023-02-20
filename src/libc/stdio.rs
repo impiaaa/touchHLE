@@ -27,14 +27,17 @@ struct FILE {
 }
 unsafe impl SafeRead for FILE {}
 
+// TODO: Rewrite this to be layered on top of the POSIX I/O implementation, so
+// that we can implement things like fdopen() in future.
+
 struct FileHostObject {
-    file: std::fs::File,
+    file: crate::fs::GuestFile,
 }
 
 fn fopen(env: &mut Environment, filename: ConstPtr<u8>, mode: ConstPtr<u8>) -> MutPtr<FILE> {
     let mut options = GuestOpenOptions::new();
     // all valid modes are UTF-8
-    match env.mem.cstr_at_utf8(mode) {
+    match env.mem.cstr_at_utf8(mode).unwrap() {
         "r" | "rb" => options.read(),
         "r+" | "rb+" | "r+b" => options.read().append(),
         "w" | "wb" => options.write().create().truncate(),
@@ -46,27 +49,23 @@ fn fopen(env: &mut Environment, filename: ConstPtr<u8>, mode: ConstPtr<u8>) -> M
         other => panic!("Unexpected fopen() mode {:?}", other),
     };
 
-    match env
-        .fs
-        .open_with_options(GuestPath::new(&env.mem.cstr_at_utf8(filename)), options)
-    {
+    let res = match env.fs.open_with_options(
+        GuestPath::new(&env.mem.cstr_at_utf8(filename).unwrap()),
+        options,
+    ) {
         Ok(file) => {
             let host_object = FileHostObject { file };
             let file_ptr = env.mem.alloc_and_write(FILE { _filler: 0 });
             env.libc_state.stdio.files.insert(file_ptr, host_object);
-            log_dbg!("fopen({:?}, {:?}) => {:?}", filename, mode, file_ptr);
             file_ptr
         }
         Err(()) => {
             // TODO: set errno
-            log!(
-                "Warning: fopen({:?}, {:?}) failed, returning NULL",
-                filename,
-                mode
-            );
             Ptr::null()
         }
-    }
+    };
+    log_dbg!("fopen({:?}, {:?}) => {:?}", filename, mode, res);
+    res
 }
 
 fn fread(
@@ -219,6 +218,23 @@ fn puts(env: &mut Environment, s: ConstPtr<u8>) -> i32 {
     0
 }
 
+fn remove(env: &mut Environment, path: ConstPtr<u8>) -> i32 {
+    match env
+        .fs
+        .remove(GuestPath::new(&env.mem.cstr_at_utf8(path).unwrap()))
+    {
+        Ok(()) => {
+            log_dbg!("remove({:?}) => 0", path);
+            0
+        }
+        Err(_) => {
+            // TODO: set errno
+            log!("Warning: remove({:?}) failed, returning -1", path);
+            -1
+        }
+    }
+}
+
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(fopen(_, _)),
     export_c_func!(fread(_, _, _, _)),
@@ -227,4 +243,5 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(ftell(_)),
     export_c_func!(fclose(_)),
     export_c_func!(puts(_)),
+    export_c_func!(remove(_)),
 ];

@@ -204,6 +204,10 @@ pub struct Mem {
     ///
     /// One advantage of `[u8; 1 << 32]` over `[u8]` is that it might help rustc
     /// optimize away bounds checks for `memory.bytes[ptr_32bit as usize]`.
+    ///
+    /// Note that unless direct memory access is disabled, the CPU emulation
+    /// (dynarmic) accesses memory via this pointer directly except when a page
+    /// fault occurs.
     bytes: *mut Bytes,
 
     allocator: allocator::Allocator,
@@ -224,6 +228,10 @@ impl Mem {
     ///
     /// We don't have full memory protection, but we can check accesses in that
     /// range.
+    ///
+    /// Note that there is also code in `src/cpu/dynarmic_wrapper/lib.cpp` which
+    /// makes assumptions about the size of the null page, and it can't see this
+    /// constant.
     pub const NULL_PAGE_SIZE: VAddr = 0x1000;
 
     /// [According to Apple](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Multithreading/CreatingThreads/CreatingThreads.html)
@@ -247,6 +255,16 @@ impl Mem {
         let allocator = allocator::Allocator::new();
 
         Mem { bytes, allocator }
+    }
+
+    /// Get a pointer to the full 4GiB of memory. This is only for use when
+    /// setting up the CPU, never call this otherwise.
+    ///
+    /// Safety: You must ensure that this pointer does not outlive the instance
+    /// of [Mem]. You must not use it while a `&mut` is held on some region of
+    /// guest memory.
+    pub unsafe fn direct_memory_access_ptr(&mut self) -> *mut std::ffi::c_void {
+        self.bytes.cast()
     }
 
     fn bytes(&self) -> &Bytes {
@@ -347,6 +365,15 @@ impl Mem {
         unsafe { ptr.write_unaligned(value) }
     }
 
+    /// C-style `memmove`.
+    pub fn memmove(&mut self, dest: MutVoidPtr, src: ConstVoidPtr, size: GuestUSize) {
+        let src = src.to_bits() as usize;
+        let dest = dest.to_bits() as usize;
+        let size = size as usize;
+        self.bytes_mut()
+            .copy_within(src..src.checked_add(size).unwrap(), dest)
+    }
+
     /// Allocate `size` bytes.
     pub fn alloc(&mut self, size: GuestUSize) -> MutVoidPtr {
         let ptr = Ptr::from_bits(self.allocator.alloc(size));
@@ -392,10 +419,12 @@ impl Mem {
         self.bytes_at(ptr, len)
     }
 
-    /// Get a C string (null-terminated) as a string slice, panicking if it is
-    /// not UTF-8. The null terminator is not included in the slice.
-    pub fn cstr_at_utf8<const MUT: bool>(&self, ptr: Ptr<u8, MUT>) -> &str {
-        std::str::from_utf8(self.cstr_at(ptr)).unwrap()
+    /// Get a C string (null-terminated) as a string slice, if it is valid
+    /// UTF-8, otherwise returning a byte slice. The null terminator is not
+    /// included in the slice.
+    pub fn cstr_at_utf8<const MUT: bool>(&self, ptr: Ptr<u8, MUT>) -> Result<&str, &[u8]> {
+        let bytes = self.cstr_at(ptr);
+        std::str::from_utf8(bytes).map_err(|_| bytes)
     }
 
     /// Permanently mark a region of address space as being unusable to the

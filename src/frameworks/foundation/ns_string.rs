@@ -14,7 +14,8 @@ use crate::frameworks::uikit::ui_font::{
 use crate::fs::GuestPath;
 use crate::mem::{ConstPtr, Mem, MutPtr, MutVoidPtr, SafeRead};
 use crate::objc::{
-    autorelease, id, msg, msg_class, objc_classes, retain, Class, ClassExports, HostObject, ObjC,
+    autorelease, id, msg, msg_class, nil, objc_classes, retain, Class, ClassExports, HostObject,
+    ObjC,
 };
 use crate::Environment;
 use std::borrow::Cow;
@@ -22,9 +23,12 @@ use std::collections::HashMap;
 use std::string::FromUtf16Error;
 
 pub type NSStringEncoding = NSUInteger;
+pub const NSASCIIStringEncoding: NSUInteger = 1;
 pub const NSUTF8StringEncoding: NSUInteger = 4;
 pub const NSUnicodeStringEncoding: NSUInteger = 10;
 pub const NSUTF16StringEncoding: NSUInteger = NSUnicodeStringEncoding;
+
+pub const NSMaximumStringLength: NSUInteger = (i32::MAX - 1) as _;
 
 #[derive(Default)]
 pub struct State {
@@ -278,7 +282,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (bool)getCString:(MutPtr<u8>)buffer
          maxLength:(NSUInteger)buffer_size
           encoding:(NSStringEncoding)encoding {
-    assert!(encoding == NSUTF8StringEncoding); // TODO: other encodings
+    assert!(encoding == NSUTF8StringEncoding || encoding == NSASCIIStringEncoding); // TODO: other encodings
 
     let src = to_rust_string(env, this);
     let dest = env.mem.bytes_at_mut(buffer, buffer_size);
@@ -291,6 +295,20 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 
     true
+}
+- (())getCString:(MutPtr<u8>)buffer {
+    // This is a deprecated method nobody should use, but unfortunately, it is
+    // used. The encoding it should use is [NSString defaultCStringEncoding]
+    // but I don't want to figure out what that is on all platforms, and the use
+    // I've seen of this method was on ASCII strings, so let's just hardcode
+    // UTF-8 and hope that works.
+
+    // Prevent slice out-of-range error
+    let length = (u32::MAX - buffer.to_bits()).min(NSMaximumStringLength);
+    let res: bool = msg![env; this getCString:buffer
+                                    maxLength:length
+                                     encoding:NSUTF8StringEncoding];
+    assert!(res);
 }
 
 - (id)componentsSeparatedByString:(id)separator { // NSString*
@@ -416,6 +434,37 @@ pub const CLASSES: ClassExports = objc_classes! {
     let result_ns_string = msg_class![env; _touchHLE_NSString alloc];
     *env.objc.borrow_mut(result_ns_string) = StringHostObject::Utf16(result);
     autorelease(env, result_ns_string)
+}
+
+- (id)stringByAppendingString:(id)other { // NSString*
+    assert!(other != nil); // TODO: raise exception
+
+    // TODO: ideally, don't convert to UTF-16 here
+    let this_len: NSUInteger = msg![env; this length];
+    let other_len: NSUInteger = msg![env; other length];
+    let mut new_utf16 = Vec::with_capacity((this_len + other_len) as usize);
+    for_each_code_unit(env, this, |_idx, c| {
+        new_utf16.push(c);
+    });
+    for_each_code_unit(env, other, |_idx, c| {
+        new_utf16.push(c);
+    });
+
+    // TODO: For a foreign subclass of NSString, do we have to return that
+    // subclass? The signature implies this isn't the case and it's probably not
+    // worth the effort, but it's an interesting question.
+    let class = env.objc.get_known_class("_touchHLE_NSString", &mut env.mem);
+    let host_object = Box::new(StringHostObject::Utf16(new_utf16));
+    env.objc.alloc_object(class, host_object, &mut env.mem)
+}
+
+- (id)stringByDeletingLastPathComponent {
+    let string = to_rust_string(env, this); // TODO: avoid copying
+    let path = GuestPath::new(&string);
+    let parent = path.parent().unwrap_or(path);
+    let new_string = from_rust_string(env, String::from(parent.as_str()));
+    autorelease(env, new_string);
+    new_string
 }
 
 - (id)stringByAppendingPathComponent:(id)component { // NSString*
@@ -560,8 +609,8 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 @end
 
-// Specialised subclass for static-lifetime strings from the guest app binary.
-@implementation _touchHLE_NSString_CFConstantString: _touchHLE_NSString_Static
+// Specialised subclasses for static-lifetime strings from the guest app binary.
+@implementation _touchHLE_NSString_CFConstantString_UTF8: _touchHLE_NSString_Static
 
 - (ConstPtr<u8>)UTF8String {
     let cfstringStruct { bytes, .. } = env.mem.read(this.cast());
@@ -569,6 +618,9 @@ pub const CLASSES: ClassExports = objc_classes! {
     bytes
 }
 
+@end
+
+@implementation _touchHLE_NSString_CFConstantString_UTF16: _touchHLE_NSString_Static
 @end
 
 };
@@ -583,16 +635,36 @@ pub fn handle_constant_string(mem: &mut Mem, objc: &mut ObjC, constant_str: id) 
         bytes,
         length,
     } = mem.read(constant_str.cast());
-    assert!(flags == 0x7C8); // no idea what this means
 
-    // All the strings I've seen are ASCII, so this might be wrong.
-    let decoded = std::str::from_utf8(mem.bytes_at(bytes, length)).unwrap();
+    // Constant CFStrings should (probably) only ever have flags 0x7c8 and 0x7d0
+    // See https://lists.llvm.org/pipermail/cfe-dev/2008-August/002518.html
+    let (host_object, class_name) = if flags == 0x7C8 {
+        // ASCII
+        let decoded = std::str::from_utf8(mem.bytes_at(bytes, length)).unwrap();
 
-    let host_object = StringHostObject::Utf8(Cow::Owned(String::from(decoded)));
+        (
+            StringHostObject::Utf8(Cow::Owned(String::from(decoded))),
+            "_touchHLE_NSString_CFConstantString_UTF8",
+        )
+    } else if flags == 0x7D0 {
+        // UTF16 (length is in code units, not bytes)
+        let decoded = mem
+            .bytes_at(bytes, length * 2)
+            .chunks(2)
+            .map(|chunk| u16::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+
+        (
+            StringHostObject::Utf16(decoded),
+            "_touchHLE_NSString_CFConstantString_UTF16",
+        )
+    } else {
+        panic!("Bad CFTypeID for constant string: {:#x}", flags);
+    };
 
     objc.register_static_object(constant_str, Box::new(host_object));
 
-    objc.get_known_class("_touchHLE_NSString_CFConstantString", mem)
+    objc.get_known_class(class_name, mem)
 }
 
 /// Shortcut for host code: get an NSString corresponding to a `&'static str`,

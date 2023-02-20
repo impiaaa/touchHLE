@@ -56,6 +56,18 @@ General options:
         Display copyright, authorship and license information.
 
 View options:
+    --landscape-left
+    --landscape-right
+        Changes the orientation the virtual device will have at startup.
+        The default is portrait.
+
+        --landscape-left means rotate 90° counterclockwise from portrait.
+        --landscape-right means rotate 90° clockwise from portrait.
+
+        Usually apps that require landscape mode will tell touchHLE about this,
+        and it will automatically rotate the window, but some apps neglect to
+        do this. These options may be useful in that case.
+
     --scale-hack=...
         Set a scaling factor for the window. touchHLE will attempt to run the
         app with an increased internal resolution. This is a hack and there's
@@ -121,9 +133,14 @@ Debugging options:
         e.g. 'T0xF00' or 'TF00'.
 
         To set multiple breakpoints, use several '--breakpoint=' arguments.
+
+    --disable-direct-memory-access
+        Force dynarmic to always access guest memory via the memory access
+        callbacks, rather than using the fast direct access path (page tables).
 ";
 
 pub struct Options {
+    initial_orientation: window::DeviceOrientation,
     scale_hack: std::num::NonZeroU32,
     deadzone: f32,
     x_tilt_range: f32,
@@ -131,6 +148,7 @@ pub struct Options {
     x_tilt_offset: f32,
     y_tilt_offset: f32,
     breakpoints: Vec<u32>,
+    direct_memory_access: bool,
 }
 
 fn main() -> Result<(), String> {
@@ -151,6 +169,7 @@ fn main() -> Result<(), String> {
     let _ = args.next().unwrap(); // skip argv[0]
 
     let mut options = Options {
+        initial_orientation: window::DeviceOrientation::Portrait,
         scale_hack: std::num::NonZeroU32::new(1).unwrap(),
         deadzone: 0.1,
         x_tilt_range: 60.0,
@@ -158,6 +177,7 @@ fn main() -> Result<(), String> {
         x_tilt_offset: 0.0,
         y_tilt_offset: 0.0,
         breakpoints: Vec::new(),
+        direct_memory_access: true,
     };
 
     let mut bundle_path: Option<PathBuf> = None;
@@ -168,8 +188,10 @@ fn main() -> Result<(), String> {
         } else if arg == "--copyright" {
             licenses::print();
             return Ok(());
-        } else if bundle_path.is_none() {
-            bundle_path = Some(PathBuf::from(arg));
+        } else if arg == "--landscape-left" {
+            options.initial_orientation = window::DeviceOrientation::LandscapeLeft;
+        } else if arg == "--landscape-right" {
+            options.initial_orientation = window::DeviceOrientation::LandscapeRight;
         } else if let Some(value) = arg.strip_prefix("--scale-hack=") {
             options.scale_hack = value
                 .parse()
@@ -193,6 +215,10 @@ fn main() -> Result<(), String> {
             options
                 .breakpoints
                 .push(if is_thumb { addr | 0x1 } else { addr });
+        } else if arg == "--disable-direct-memory-access" {
+            options.direct_memory_access = false;
+        } else if bundle_path.is_none() {
+            bundle_path = Some(PathBuf::from(arg));
         } else {
             eprintln!("{}", USAGE);
             return Err(format!("Unexpected argument: {:?}", arg));
@@ -282,18 +308,24 @@ impl Environment {
     fn new(bundle_path: PathBuf, options: Options) -> Result<Environment, String> {
         let startup_time = std::time::Instant::now();
 
-        let (bundle, fs) = match bundle::Bundle::new_bundle_and_fs_from_host_path(bundle_path) {
+        let bundle_data = fs::BundleData::open_any(&bundle_path)
+            .map_err(|e| format!("Could not open app bundle: {e}"))?;
+        let (bundle, fs) = match bundle::Bundle::new_bundle_and_fs_from_host_path(bundle_data) {
             Ok(bundle) => bundle,
             Err(err) => {
-                return Err(format!("Application bundle error: {}. Check that the path is to a .app directory. If this is a .ipa file, you need to extract it as a ZIP file to get the .app directory.", err));
+                return Err(format!("Application bundle error: {err}. Check that the path is to an .app directory or an .ipa file."));
             }
         };
 
         let icon = fs
             .read(bundle.icon_path())
-            .map_err(|_| "Could not read icon file".to_string())?;
-        let icon = image::Image::from_bytes(&icon)
-            .map_err(|e| format!("Could not parse icon image {:?}: {}", bundle.icon_path(), e).to_string())?;
+            .map_err(|_| "Could not read icon file".to_string())
+            .and_then(|bytes| {
+                image::Image::from_bytes(&bytes).map_err(|e| format!("Could not parse icon image: {e}").to_string())
+            });
+        if let Err(e) = &icon {
+            log!("Warning: {}", e);
+        }
 
         let launch_image = fs
             .read(bundle.launch_image_path())
@@ -302,7 +334,7 @@ impl Environment {
 
         let window = window::Window::new(
             &format!("{} (touchHLE {})", bundle.display_name(), VERSION),
-            icon,
+            icon.ok(),
             launch_image,
             &options,
         );
@@ -338,12 +370,13 @@ impl Environment {
             };
         }
 
-        let entry_point_addr = *executable.exported_symbols.get("start").ok_or_else(|| {
-            "Mach-O file has no 'start' symbol, perhaps it is not an executable?".to_string()
+        let entry_point_addr = executable.entry_point_pc.ok_or_else(|| {
+            "Mach-O file does not specify an entry point PC, perhaps it is not an executable?"
+                .to_string()
         })?;
         let entry_point_addr = abi::GuestFunction::from_addr_with_thumb_bit(entry_point_addr);
 
-        println!("Address of start function: {:?}", entry_point_addr);
+        log_dbg!("Address of start function: {:?}", entry_point_addr);
 
         let mut bins = dylibs;
         bins.insert(0, executable);
@@ -357,7 +390,10 @@ impl Environment {
             dyld.set_breakpoint(&mut mem, breakpoint);
         }
 
-        let cpu = cpu::Cpu::new();
+        let cpu = cpu::Cpu::new(match options.direct_memory_access {
+            true => Some(&mut mem),
+            false => None,
+        });
 
         let main_thread = Thread {
             active: true,

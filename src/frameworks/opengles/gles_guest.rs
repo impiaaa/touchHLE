@@ -82,12 +82,15 @@ fn glGetIntegerv(env: &mut Environment, pname: GLenum, params: MutPtr<GLint>) {
         // This function family can return a huge number of things.
         // TODO: support more possible values.
         let param_count = match pname {
-            gles11::MATRIX_MODE | gles11::TEXTURE_BINDING_2D => 1,
+            gles11::MATRIX_MODE | gles11::MAX_TEXTURE_SIZE | gles11::TEXTURE_BINDING_2D => 1,
             _ => unimplemented!("pname value {:#x}", pname),
         };
         let params = mem.ptr_at_mut(params, param_count);
         unsafe { gles.GetIntegerv(pname, params) };
     });
+}
+fn glHint(env: &mut Environment, target: GLenum, mode: GLenum) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe { gles.Hint(target, mode) })
 }
 
 // Other state manipulation
@@ -102,38 +105,40 @@ fn glBlendFunc(env: &mut Environment, sfactor: GLenum, dfactor: GLenum) {
         gles.BlendFunc(sfactor, dfactor)
     })
 }
+fn glCullFace(env: &mut Environment, mode: GLenum) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe { gles.CullFace(mode) })
+}
 fn glDepthMask(env: &mut Environment, flag: GLboolean) {
     with_ctx_and_mem(env, |gles, _mem| unsafe { gles.DepthMask(flag) })
+}
+fn glDepthRangef(env: &mut Environment, near: GLclampf, far: GLclampf) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe { gles.DepthRangef(near, far) })
+}
+fn glDepthRangex(env: &mut Environment, near: GLclampx, far: GLclampx) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe { gles.DepthRangex(near, far) })
+}
+fn glFrontFace(env: &mut Environment, mode: GLenum) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe { gles.FrontFace(mode) })
 }
 fn glShadeModel(env: &mut Environment, mode: GLenum) {
     with_ctx_and_mem(env, |gles, _mem| unsafe { gles.ShadeModel(mode) })
 }
 fn glScissor(env: &mut Environment, x: GLint, y: GLint, width: GLsizei, height: GLsizei) {
-    // apply scale hack
-    let (width, height) = if x == 0
-        && y == 0
-        && (width as u32, height as u32) == env.window.size_unrotated_unscaled()
-    {
-        let (width, height) = env.window.size_unrotated_scalehacked();
-        (width as GLsizei, height as GLsizei)
-    } else {
-        (width, height)
-    };
+    // apply scale hack: assume framebuffer's size is larger than the app thinks
+    // and scale scissor appropriately
+    let factor = env.options.scale_hack.get() as GLsizei;
+    let (x, y) = (x * factor, y * factor);
+    let (width, height) = (width * factor, height * factor);
     with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.Scissor(x, y, width, height)
     })
 }
 fn glViewport(env: &mut Environment, x: GLint, y: GLint, width: GLsizei, height: GLsizei) {
-    // apply scale hack
-    let (width, height) = if x == 0
-        && y == 0
-        && (width as u32, height as u32) == env.window.size_unrotated_unscaled()
-    {
-        let (width, height) = env.window.size_unrotated_scalehacked();
-        (width as GLsizei, height as GLsizei)
-    } else {
-        (width, height)
-    };
+    // apply scale hack: assume framebuffer's size is larger than the app thinks
+    // and scale viewport appropriately
+    let factor = env.options.scale_hack.get() as GLsizei;
+    let (x, y) = (x * factor, y * factor);
+    let (width, height) = (width * factor, height * factor);
     with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.Viewport(x, y, width, height)
     })
@@ -476,6 +481,16 @@ fn glTexParameteri(env: &mut Environment, target: GLenum, pname: GLenum, param: 
         gles.TexParameteri(target, pname, param)
     })
 }
+fn glTexParameterf(env: &mut Environment, target: GLenum, pname: GLenum, param: GLfloat) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.TexParameterf(target, pname, param)
+    })
+}
+fn glTexParameterx(env: &mut Environment, target: GLenum, pname: GLenum, param: GLfixed) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.TexParameterx(target, pname, param)
+    })
+}
 fn glTexImage2D(
     env: &mut Environment,
     target: GLenum,
@@ -520,6 +535,57 @@ fn glTexImage2D(
         )
     })
 }
+fn glTexEnvf(env: &mut Environment, target: GLenum, pname: GLenum, param: GLfloat) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.TexEnvf(target, pname, param)
+    })
+}
+fn glTexEnvx(env: &mut Environment, target: GLenum, pname: GLenum, param: GLfixed) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.TexEnvx(target, pname, param)
+    })
+}
+fn glTexEnvi(env: &mut Environment, target: GLenum, pname: GLenum, param: GLint) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.TexEnvi(target, pname, param)
+    })
+}
+fn glTexEnvfv(env: &mut Environment, target: GLenum, pname: GLenum, params: ConstPtr<GLfloat>) {
+    // TODO: GL_POINT_SPRITE_OES
+    assert!(target == gles11::TEXTURE_ENV);
+    let &(_, _, pcount) = super::gles1_on_gl2::TEX_ENV_PARAMS
+        .iter()
+        .find(|&&(pname2, _, _)| pname == pname2)
+        .unwrap();
+    with_ctx_and_mem(env, |gles, mem| {
+        let params = mem.ptr_at(params, pcount.into());
+        unsafe { gles.TexEnvfv(target, pname, params) }
+    })
+}
+fn glTexEnvxv(env: &mut Environment, target: GLenum, pname: GLenum, params: ConstPtr<GLfixed>) {
+    // TODO: GL_POINT_SPRITE_OES
+    assert!(target == gles11::TEXTURE_ENV);
+    let &(_, _, pcount) = super::gles1_on_gl2::TEX_ENV_PARAMS
+        .iter()
+        .find(|&&(pname2, _, _)| pname == pname2)
+        .unwrap();
+    with_ctx_and_mem(env, |gles, mem| {
+        let params = mem.ptr_at(params, pcount.into());
+        unsafe { gles.TexEnvxv(target, pname, params) }
+    })
+}
+fn glTexEnviv(env: &mut Environment, target: GLenum, pname: GLenum, params: ConstPtr<GLint>) {
+    // TODO: GL_POINT_SPRITE_OES
+    assert!(target == gles11::TEXTURE_ENV);
+    let &(_, _, pcount) = super::gles1_on_gl2::TEX_ENV_PARAMS
+        .iter()
+        .find(|&&(pname2, _, _)| pname == pname2)
+        .unwrap();
+    with_ctx_and_mem(env, |gles, mem| {
+        let params = mem.ptr_at(params, pcount.into());
+        unsafe { gles.TexEnviv(target, pname, params) }
+    })
+}
 
 // OES_framebuffer_object
 fn glGenFramebuffersOES(env: &mut Environment, n: GLsizei, framebuffers: MutPtr<GLuint>) {
@@ -553,13 +619,9 @@ fn glRenderbufferStorageOES(
     width: GLsizei,
     height: GLsizei,
 ) {
-    // apply scale hack
-    let (width, height) = if (width as u32, height as u32) == env.window.size_unrotated_unscaled() {
-        let (width, height) = env.window.size_unrotated_scalehacked();
-        (width as GLsizei, height as GLsizei)
-    } else {
-        (width, height)
-    };
+    // apply scale hack: give the app a larger framebuffer than it asked for
+    let factor = env.options.scale_hack.get() as GLsizei;
+    let (width, height) = (width * factor, height * factor);
     with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.RenderbufferStorageOES(target, internalformat, width, height)
     })
@@ -581,14 +643,34 @@ fn glGetRenderbufferParameterivOES(
     pname: GLenum,
     params: MutPtr<GLint>,
 ) {
+    let factor = env.options.scale_hack.get() as GLint;
     with_ctx_and_mem(env, |gles, mem| {
         let params = mem.ptr_at_mut(params, 1);
-        unsafe { gles.GetRenderbufferParameterivOES(target, pname, params) }
+        unsafe { gles.GetRenderbufferParameterivOES(target, pname, params) };
+        // apply scale hack: scale down the reported size of the framebuffer,
+        // assuming the framebuffer's true size is larger than it should be
+        if pname == gles11::RENDERBUFFER_WIDTH_OES || pname == gles11::RENDERBUFFER_HEIGHT_OES {
+            unsafe { params.write_unaligned(params.read_unaligned() / factor) }
+        }
     })
 }
 fn glCheckFramebufferStatusOES(env: &mut Environment, target: GLenum) -> GLenum {
     with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.CheckFramebufferStatusOES(target)
+    })
+}
+fn glDeleteFramebuffersOES(env: &mut Environment, n: GLsizei, framebuffers: MutPtr<GLuint>) {
+    with_ctx_and_mem(env, |gles, mem| {
+        let n_usize: GuestUSize = n.try_into().unwrap();
+        let framebuffers = mem.ptr_at_mut(framebuffers, n_usize);
+        unsafe { gles.DeleteFramebuffersOES(n, framebuffers) }
+    })
+}
+fn glDeleteRenderbuffersOES(env: &mut Environment, n: GLsizei, renderbuffers: MutPtr<GLuint>) {
+    with_ctx_and_mem(env, |gles, mem| {
+        let n_usize: GuestUSize = n.try_into().unwrap();
+        let renderbuffers = mem.ptr_at_mut(renderbuffers, n_usize);
+        unsafe { gles.DeleteRenderbuffersOES(n, renderbuffers) }
     })
 }
 
@@ -600,11 +682,16 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glEnableClientState(_)),
     export_c_func!(glDisableClientState(_)),
     export_c_func!(glGetIntegerv(_, _)),
+    export_c_func!(glHint(_, _)),
     // Other state manipulation
     export_c_func!(glAlphaFunc(_, _)),
     export_c_func!(glAlphaFuncx(_, _)),
     export_c_func!(glBlendFunc(_, _)),
+    export_c_func!(glCullFace(_)),
     export_c_func!(glDepthMask(_)),
+    export_c_func!(glDepthRangef(_, _)),
+    export_c_func!(glDepthRangex(_, _)),
+    export_c_func!(glFrontFace(_)),
     export_c_func!(glShadeModel(_)),
     export_c_func!(glScissor(_, _, _, _)),
     export_c_func!(glViewport(_, _, _, _)),
@@ -659,7 +746,15 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glDeleteTextures(_, _)),
     export_c_func!(glBindTexture(_, _)),
     export_c_func!(glTexParameteri(_, _, _)),
+    export_c_func!(glTexParameterf(_, _, _)),
+    export_c_func!(glTexParameterx(_, _, _)),
     export_c_func!(glTexImage2D(_, _, _, _, _, _, _, _, _)),
+    export_c_func!(glTexEnvf(_, _, _)),
+    export_c_func!(glTexEnvx(_, _, _)),
+    export_c_func!(glTexEnvi(_, _, _)),
+    export_c_func!(glTexEnvfv(_, _, _)),
+    export_c_func!(glTexEnvxv(_, _, _)),
+    export_c_func!(glTexEnviv(_, _, _)),
     // OES_framebuffer_object
     export_c_func!(glGenFramebuffersOES(_, _)),
     export_c_func!(glGenRenderbuffersOES(_, _)),
@@ -669,4 +764,6 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glFramebufferRenderbufferOES(_, _, _, _)),
     export_c_func!(glGetRenderbufferParameterivOES(_, _, _)),
     export_c_func!(glCheckFramebufferStatusOES(_)),
+    export_c_func!(glDeleteFramebuffersOES(_, _)),
+    export_c_func!(glDeleteRenderbuffersOES(_, _)),
 ];

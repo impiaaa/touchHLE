@@ -26,12 +26,17 @@ pub trait GLES {
     unsafe fn EnableClientState(&mut self, array: GLenum);
     unsafe fn DisableClientState(&mut self, array: GLenum);
     unsafe fn GetIntegerv(&mut self, pname: GLenum, params: *mut GLint);
+    unsafe fn Hint(&mut self, target: GLenum, mode: GLenum);
 
     // Other state manipulation
     unsafe fn AlphaFunc(&mut self, func: GLenum, ref_: GLclampf);
     unsafe fn AlphaFuncx(&mut self, func: GLenum, ref_: GLclampx);
     unsafe fn BlendFunc(&mut self, sfactor: GLenum, dfactor: GLenum);
+    unsafe fn CullFace(&mut self, mode: GLenum);
     unsafe fn DepthMask(&mut self, flag: GLboolean);
+    unsafe fn DepthRangef(&mut self, near: GLclampf, far: GLclampf);
+    unsafe fn DepthRangex(&mut self, near: GLclampx, far: GLclampx);
+    unsafe fn FrontFace(&mut self, mode: GLenum);
     unsafe fn ShadeModel(&mut self, mode: GLenum);
     unsafe fn Scissor(&mut self, x: GLint, y: GLint, width: GLsizei, height: GLsizei);
     unsafe fn Viewport(&mut self, x: GLint, y: GLint, width: GLsizei, height: GLsizei);
@@ -110,6 +115,8 @@ pub trait GLES {
     unsafe fn DeleteTextures(&mut self, n: GLsizei, textures: *const GLuint);
     unsafe fn BindTexture(&mut self, target: GLenum, texture: GLuint);
     unsafe fn TexParameteri(&mut self, target: GLenum, pname: GLenum, param: GLint);
+    unsafe fn TexParameterf(&mut self, target: GLenum, pname: GLenum, param: GLfloat);
+    unsafe fn TexParameterx(&mut self, target: GLenum, pname: GLenum, param: GLfixed);
     unsafe fn TexImage2D(
         &mut self,
         target: GLenum,
@@ -122,6 +129,12 @@ pub trait GLES {
         type_: GLenum,
         pixels: *const GLvoid,
     );
+    unsafe fn TexEnvf(&mut self, target: GLenum, pname: GLenum, param: GLfloat);
+    unsafe fn TexEnvx(&mut self, target: GLenum, pname: GLenum, param: GLfixed);
+    unsafe fn TexEnvi(&mut self, target: GLenum, pname: GLenum, param: GLint);
+    unsafe fn TexEnvfv(&mut self, target: GLenum, pname: GLenum, params: *const GLfloat);
+    unsafe fn TexEnvxv(&mut self, target: GLenum, pname: GLenum, params: *const GLfixed);
+    unsafe fn TexEnviv(&mut self, target: GLenum, pname: GLenum, params: *const GLint);
 
     // Matrix stack operations
     unsafe fn MatrixMode(&mut self, mode: GLenum);
@@ -201,4 +214,6 @@ pub trait GLES {
         params: *mut GLint,
     );
     unsafe fn CheckFramebufferStatusOES(&mut self, target: GLenum) -> GLenum;
+    unsafe fn DeleteFramebuffersOES(&mut self, n: GLsizei, framebuffers: *mut GLuint);
+    unsafe fn DeleteRenderbuffersOES(&mut self, n: GLsizei, renderbuffers: *mut GLuint);
 }

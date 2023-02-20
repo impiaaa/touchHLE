@@ -124,17 +124,7 @@ fn alcGetProcAddress(
     _device: ConstPtr<GuestALCdevice>,
     func_name: ConstPtr<u8>,
 ) -> ConstVoidPtr {
-    // Apple-specific extension that Super Monkey Ball tries to use.
-    // Conveniently, if NULL is returned, it just skips trying to use it, so
-    // let's do that.
-    if env.mem.cstr_at_utf8(func_name) == "alcMacOSXMixerOutputRate" {
-        // Warn in case other apps don't check for NULL. The spec doesn't even
-        // mention that as a possibility.
-        log!("Returning NULL for alcGetProcAddress(..., \"alcMacOSXMixerOutputRate\").");
-        return Ptr::null();
-    }
-
-    let mangled_func_name = format!("_{}", env.mem.cstr_at_utf8(func_name));
+    let mangled_func_name = format!("_{}", env.mem.cstr_at_utf8(func_name).unwrap());
     assert!(mangled_func_name.starts_with("_al"));
 
     if let Ok(ptr) = env
@@ -291,6 +281,11 @@ fn alBufferDataStatic(
     alBufferData(env, buffer, format, data, size, samplerate);
 }
 
+// Apple-specific extension to OpenAL
+fn alcMacOSXMixerOutputRate(_env: &mut Environment, value: ALdouble) {
+    log!("App wants to set mixer output sample rate to {} Hz", value);
+}
+
 // TODO: more functions
 
 pub const FUNCTIONS: FunctionExports = &[
@@ -316,4 +311,5 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(alDeleteBuffers(_, _)),
     export_c_func!(alBufferData(_, _, _, _, _)),
     export_c_func!(alBufferDataStatic(_, _, _, _, _)),
+    export_c_func!(alcMacOSXMixerOutputRate(_)),
 ];
