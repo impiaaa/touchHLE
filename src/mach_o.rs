@@ -228,30 +228,47 @@ impl MachO {
 
         let file = OFile::parse(&mut cursor).map_err(|_| "Could not parse Mach-O file")?;
 
-        let (header, commands) = match file {
+        let (myheader, mycommands) = match file {
             OFile::MachFile { header, commands } => (header, commands),
-            OFile::FatFile { .. } => {
-                unimplemented!("Fat binary support is not implemented yet");
+            OFile::FatFile { files, .. } => {
+                let (_arch, subfile) = files
+                    .iter()
+                    .filter(|(arch, _file)| {
+                        (arch.cputype == mach_object::CPU_TYPE_ARM
+                            && (arch.cpusubtype == 6
+                                || arch.cpusubtype == 9
+                                || arch.cpusubtype == 13))
+                            || (arch.cputype == 0x0100000C
+                                && (arch.cpusubtype == 0 || arch.cpusubtype == 1))
+                    })
+                    .next()
+                    .expect("No suitable architecture");
+                match subfile {
+                    OFile::MachFile { header, commands } => (header.clone(), commands.clone()),
+                    _ => {
+                        return Err("Unexpected Mach-O file kind: not an executable");
+                    }
+                }
             }
             OFile::ArFile { .. } | OFile::SymDef { .. } => {
                 return Err("Unexpected Mach-O file kind: not an executable");
             }
         };
 
-        if header.cputype != mach_object::CPU_TYPE_ARM {
+        if myheader.cputype != mach_object::CPU_TYPE_ARM {
             return Err("Executable is not for an ARM CPU!");
         }
-        let is_bigend = header.is_bigend();
+        let is_bigend = myheader.is_bigend();
         if is_bigend {
             return Err("Executable is not little-endian!");
         }
-        let is_64bit = header.is_64bit();
+        let is_64bit = myheader.is_64bit();
         if is_64bit {
             return Err("Executable is not 32-bit!");
         }
         // TODO: Check cpusubtype (should be some flavour of ARMv6/ARMv7)
 
-        let split_segs = (header.flags & mach_object::MH_SPLIT_SEGS) != 0;
+        let split_segs = (myheader.flags & mach_object::MH_SPLIT_SEGS) != 0;
 
         // Info used while parsing file
         let mut first_segment_base: Option<u32> = None;
@@ -267,7 +284,7 @@ impl MachO {
         let mut external_relocations: Vec<(u32, String)> = Vec::new();
         let mut entry_point_pc: Option<u32> = None;
 
-        for MachCommand(command, _size) in commands {
+        for MachCommand(command, _size) in mycommands {
             match command {
                 LoadCommand::Segment {
                     segname,
@@ -279,9 +296,9 @@ impl MachO {
                     sections,
                     ..
                 } => {
-                    let vmaddr: u32 = vmaddr.try_into().unwrap();
-                    let vmsize: u32 = vmsize.try_into().unwrap();
-                    let filesize: u32 = filesize.try_into().unwrap();
+                    let vmaddr: u32 = (vmaddr).try_into().unwrap();
+                    let vmsize: u32 = (vmsize).try_into().unwrap();
+                    let filesize: u32 = (filesize).try_into().unwrap();
 
                     if first_segment_base.is_none() {
                         first_segment_base = Some(vmaddr);
@@ -340,7 +357,7 @@ impl MachO {
                     strsize,
                 } => {
                     sym_tab_info = Some((symoff, nsyms, stroff, strsize));
-                    if cursor.seek(SeekFrom::Start(symoff.into())).is_ok() {
+                    if cursor.seek(SeekFrom::Start(symoff as u64)).is_ok() {
                         let mut cursor = cursor.clone();
                         let symbols = SymbolIter::new(
                             &mut cursor,
@@ -395,6 +412,9 @@ impl MachO {
                             is_64bit,
                             &mut cursor,
                         );
+                        if let Some(Symbol::Debug { .. }) = sym {
+                            continue;
+                        }
                         indirect_undef_symbols.push(match sym {
                             // apparently used in apps?
                             Some(Symbol::Undefined { name: Some(n), .. }) => Some(String::from(n)),
@@ -455,6 +475,7 @@ impl MachO {
                                 };
                                 into_mem.write(addr, entry);
                             }
+                            None => {}
                             _ => panic!("Unexpected symbol kind {:?}", sym),
                         };
                     }
