@@ -445,7 +445,7 @@ impl Fs {
     /// host.
     pub fn new(
         app_bundle: BundleData,
-        bundle_dir_name: String,
+        bundle_dir_name: &str,
         bundle_id: &str,
         read_only_mode: bool,
     ) -> (Fs, GuestPathBuf) {
@@ -490,7 +490,7 @@ impl Fs {
             );
 
         let mut app_dir_children = HashMap::new();
-        app_dir_children.insert(bundle_dir_name, app_bundle.into_fs_node());
+        app_dir_children.insert(bundle_dir_name.into(), app_bundle.into_fs_node());
         if let Some(documents_host_path) = documents_host_path {
             app_dir_children.insert(
                 "Documents".to_string(),

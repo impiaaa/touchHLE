@@ -21,6 +21,7 @@ use std::io::Cursor;
 pub struct Bundle {
     path: GuestPathBuf,
     plist: Dictionary,
+    bundle_name: String,
 }
 
 impl Bundle {
@@ -48,11 +49,12 @@ impl Bundle {
         );
         let bundle_id = plist["CFBundleIdentifier"].as_string().unwrap();
 
-        let (fs, guest_path) = Fs::new(bundle_data, bundle_name, bundle_id, read_only_mode);
+        let (fs, guest_path) = Fs::new(bundle_data, &bundle_name, bundle_id, read_only_mode);
 
         let bundle = Bundle {
             path: guest_path,
             plist,
+            bundle_name: bundle_name.into(),
         };
 
         Ok((bundle, fs))
@@ -63,6 +65,7 @@ impl Bundle {
         Bundle {
             path: GuestPathBuf::from(String::new()),
             plist: Dictionary::new(),
+            bundle_name: "".into(),
         }
     }
 
@@ -96,7 +99,10 @@ impl Bundle {
     }
 
     pub fn display_name(&self) -> &str {
-        self.plist["CFBundleDisplayName"].as_string().unwrap()
+        self.plist
+            .get("CFBundleDisplayName")
+            .map(|v| v.as_string().unwrap())
+            .unwrap_or(&self.bundle_name)
     }
 
     pub fn minimum_os_version(&self) -> Option<&str> {
